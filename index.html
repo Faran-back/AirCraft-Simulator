@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Desert Aircraft Simulator</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: linear-gradient(to bottom, #87CEEB, #E0F7FA);
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            text-shadow: 1px 1px 2px black;
+            pointer-events: none;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            text-shadow: 1px 1px 2px black;
+        }
+        #game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: red;
+            font-size: 48px;
+            text-shadow: 2px 2px 4px black;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div>Speed: <span id="speed">0</span> km/h</div>
+        <div>Altitude: <span id="altitude">0</span> m</div>
+        <div>Throttle: <span id="throttle">0</span>%</div>
+        <div>Health: <span id="health">100</span>%</div>
+    </div>
+    <div id="loading">Loading...</div>
+    <div id="game-over">CRASHED! Refresh to restart</div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Scene setup
+            const scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x87CEEB, 0.0005);
+            
+            // Camera setup for TPP (Third Person Perspective)
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+            const cameraOffset = new THREE.Vector3(0, 3, -15);
+            let cameraDistance = 15;
+            
+            // Renderer with performance optimizations
+            const renderer = new THREE.WebGLRenderer({
+                antialias: false,
+                powerPreference: "high-performance"
+            });
+            renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = false;
+            document.body.appendChild(renderer.domElement);
+            
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+            
+            // Skybox
+            const skyGeometry = new THREE.SphereGeometry(5000, 32, 32);
+            const skyMaterial = new THREE.MeshBasicMaterial({
+                color: 0x87CEEB,
+                side: THREE.BackSide
+            });
+            const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+            scene.add(sky);
+            
+            // Desert Terrain with collision detection
+            const terrainSize = 10000;
+            const terrainGeometry = new THREE.PlaneGeometry(terrainSize, terrainSize, 100, 100);
+            
+            // Add some desert-like variation
+            const positionAttribute = terrainGeometry.attributes.position;
+            for (let i = 0; i < positionAttribute.count; i++) {
+                const x = positionAttribute.getX(i);
+                const z = positionAttribute.getZ(i);
+                
+                // Create gentle dunes
+                const distance = Math.sqrt(x*x + z*z);
+                const height = Math.sin(x * 0.002) * Math.cos(z * 0.002) * 20;
+                positionAttribute.setY(i, height - 10);
+            }
+            positionAttribute.needsUpdate = true;
+            
+            const terrainMaterial = new THREE.MeshStandardMaterial({
+                color: 0xd2b48c, // Desert sand color
+                wireframe: false
+            });
+            const terrain = new THREE.Mesh(terrainGeometry, terrainMaterial);
+            terrain.rotation.x = -Math.PI / 2;
+            scene.add(terrain);
+            
+            // Cloud particles
+            const cloudGeometry = new THREE.BufferGeometry();
+            const cloudCount = 100;
+            const positions = new Float32Array(cloudCount * 3);
+            const sizes = new Float32Array(cloudCount);
+            
+            for (let i = 0; i < cloudCount; i++) {
+                positions[i * 3] = Math.random() * 2000 - 1000;
+                positions[i * 3 + 1] = Math.random() * 300 + 50;
+                positions[i * 3 + 2] = Math.random() * 2000 - 1000;
+                sizes[i] = Math.random() * 20 + 5;
+            }
+            
+            cloudGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            cloudGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+            
+            const cloudMaterial = new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 10,
+                transparent: true,
+                opacity: 0.7,
+                sizeAttenuation: true
+            });
+            
+            const cloudSystem = new THREE.Points(cloudGeometry, cloudMaterial);
+            scene.add(cloudSystem);
+            
+            // Improved Aircraft Model with collision box
+            const createAircraft = () => {
+                const group = new THREE.Group();
+                
+                // Collision box (invisible)
+                const collisionBox = new THREE.Box3();
+                const collisionBoxHelper = new THREE.Box3Helper(collisionBox, 0xff0000);
+                group.collisionBox = collisionBox;
+                
+                // Fuselage
+                const bodyGeometry = new THREE.CylinderGeometry(0.5, 0.8, 6, 12);
+                const bodyMaterial = new THREE.MeshPhongMaterial({ color: 0x555555 });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                body.rotation.z = Math.PI / 2;
+                group.add(body);
+                
+                // Wings
+                const wingGeometry = new THREE.BoxGeometry(8, 0.2, 1.5);
+                const wingMaterial = new THREE.MeshPhongMaterial({ color: 0x333333 });
+                const wing = new THREE.Mesh(wingGeometry, wingMaterial);
+                wing.position.set(0, 0, 0);
+                group.add(wing);
+                
+                // Tail wing
+                const tailWingGeometry = new THREE.BoxGeometry(1.5, 0.2, 2);
+                const tailWing = new THREE.Mesh(tailWingGeometry, wingMaterial);
+                tailWing.position.set(-3, 0, 0);
+                group.add(tailWing);
+                
+                // Vertical stabilizer
+                const stabilizerGeometry = new THREE.BoxGeometry(0.2, 1, 1);
+                const stabilizer = new THREE.Mesh(stabilizerGeometry, wingMaterial);
+                stabilizer.position.set(-3, 0.5, 0);
+                group.add(stabilizer);
+                
+                // Engine/propeller
+                const engineGeometry = new THREE.CylinderGeometry(0.3, 0.3, 1, 8);
+                const engineMaterial = new THREE.MeshPhongMaterial({ color: 0x222222 });
+                const engine = new THREE.Mesh(engineGeometry, engineMaterial);
+                engine.position.set(3.5, 0, 0);
+                engine.rotation.z = Math.PI / 2;
+                group.add(engine);
+                
+                // Propeller blades
+                const propellerGroup = new THREE.Group();
+                const bladeGeometry = new THREE.BoxGeometry(0.1, 2, 0.4);
+                const bladeMaterial = new THREE.MeshPhongMaterial({ color: 0x888888 });
+                
+                for (let i = 0; i < 3; i++) {
+                    const blade = new THREE.Mesh(bladeGeometry, bladeMaterial);
+                    blade.position.set(4, 0, 0);
+                    blade.rotation.z = (i * Math.PI * 2) / 3;
+                    propellerGroup.add(blade);
+                }
+                
+                propellerGroup.position.set(3.5, 0, 0);
+                group.add(propellerGroup);
+                
+                return { group, propellerGroup };
+            };
+            
+            const { group: aircraft, propellerGroup: propeller } = createAircraft();
+            aircraft.position.set(0, 100, 0);
+            scene.add(aircraft);
+            
+            // Game state
+            const state = {
+                speed: 150,
+                maxSpeed: 500,
+                minSpeed: 50,
+                throttle: 50,
+                acceleration: 0.5,
+                rotationSpeed: 0.03,
+                pitch: 0,
+                roll: 0,
+                yaw: 0,
+                altitude: 100,
+                autoLevelSpeed: 0.01,
+                stallSpeed: 80,
+                health: 100,
+                crashed: false,
+                cameraMode: 'tpp', // tpp or fps
+                cameraDistance: 15
+            };
+            
+            // Controls
+            const keys = {
+                w: false,
+                s: false,
+                a: false,
+                d: false,
+                q: false,
+                e: false,
+                shift: false,
+                space: false,
+                c: false
+            };
+            
+            document.addEventListener('keydown', (e) => {
+                if (e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = true;
+                if (e.key === ' ') keys.space = true;
+                if (e.key === 'Shift') keys.shift = true;
+                if (e.key === 'c') {
+                    state.cameraMode = state.cameraMode === 'tpp' ? 'fpp' : 'tpp';
+                }
+            });
+            
+            document.addEventListener('keyup', (e) => {
+                if (e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = false;
+                if (e.key === ' ') keys.space = false;
+                if (e.key === 'Shift') keys.shift = false;
+            });
+            
+            // Remove loading screen
+            document.getElementById('loading').style.display = 'none';
+            
+            // Collision detection
+            const checkCollision = () => {
+                // Update aircraft collision box
+                aircraft.collisionBox.setFromObject(aircraft);
+                
+                // Check if aircraft is below terrain at any point
+                const aircraftPos = aircraft.position.clone();
+                const terrainHeight = getTerrainHeight(aircraftPos.x, aircraftPos.z);
+                
+                if (aircraftPos.y <= terrainHeight + 1) {
+                    // Calculate crash damage based on speed
+                    const crashDamage = Math.min(100, state.speed / 2);
+                    state.health -= crashDamage;
+                    
+                    if (state.health <= 0) {
+                        state.crashed = true;
+                        document.getElementById('game-over').style.display = 'block';
+                    }
+                }
+            };
+            
+            // Get terrain height at specific coordinates
+            const getTerrainHeight = (x, z) => {
+                // Simple approximation since we have a flat terrain with dunes
+                const height = Math.sin(x * 0.002) * Math.cos(z * 0.002) * 20 - 10;
+                return height;
+            };
+            
+            // Animation loop
+            const clock = new THREE.Clock();
+            
+            const animate = (time) => {
+                requestAnimationFrame(animate);
+                
+                if (state.crashed) return;
+                
+                const delta = Math.min(clock.getDelta(), 0.1); // Cap delta to prevent physics issues
+                
+                // Throttle control
+                if (keys.w) state.throttle = Math.min(100, state.throttle + 0.5);
+                if (keys.s) state.throttle = Math.max(0, state.throttle - 0.5);
+                
+                // Calculate speed based on throttle
+                const targetSpeed = state.minSpeed + (state.maxSpeed - state.minSpeed) * (state.throttle / 100);
+                state.speed = THREE.MathUtils.lerp(state.speed, targetSpeed, 0.05);
+                
+                // Ascend/descend
+                if (keys.space) aircraft.position.y += 1;
+                if (keys.shift) aircraft.position.y -= 1;
+                
+                // Banking controls (QE for roll)
+                if (keys.q) state.roll += state.rotationSpeed;
+                if (keys.e) state.roll -= state.rotationSpeed;
+                
+                // Pitch controls (AD)
+                if (keys.a) state.pitch += state.rotationSpeed;
+                if (keys.d) state.pitch -= state.rotationSpeed;
+                
+                // Auto-leveling when not actively controlling
+                if (!keys.q && !keys.e) {
+                    state.roll = THREE.MathUtils.lerp(state.roll, 0, state.autoLevelSpeed);
+                }
+                
+                if (!keys.a && !keys.d) {
+                    state.pitch = THREE.MathUtils.lerp(state.pitch, 0, state.autoLevelSpeed);
+                }
+                
+                // Clamp values
+                state.roll = THREE.MathUtils.clamp(state.roll, -Math.PI/3, Math.PI/3);
+                state.pitch = THREE.MathUtils.clamp(state.pitch, -Math.PI/4, Math.PI/4);
+                
+                // Apply physics
+                const actualSpeed = state.speed * delta;
+                
+                // Move aircraft forward based on its rotation
+                const forwardVector = new THREE.Vector3(0, 0, -1);
+                forwardVector.applyQuaternion(aircraft.quaternion);
+                aircraft.position.addScaledVector(forwardVector, actualSpeed);
+                
+                // Apply rotations
+                aircraft.rotation.z = state.roll;
+                aircraft.rotation.x = state.pitch;
+                
+                // Yaw effect from roll (realistic flight)
+                aircraft.rotation.y += state.roll * 0.2 * delta * 10;
+                
+                // Propeller rotation
+                propeller.rotation.x += delta * state.speed * 0.1;
+                
+                // Update camera based on mode
+                if (state.cameraMode === 'tpp') {
+                    // Third-person perspective
+                    const cameraOffset = new THREE.Vector3(0, 3, -state.cameraDistance);
+                    cameraOffset.applyQuaternion(aircraft.quaternion);
+                    const cameraTarget = aircraft.position.clone().add(cameraOffset);
+                    
+                    // Add some camera lag for smoother movement
+                    camera.position.lerp(cameraTarget, 0.1);
+                    camera.lookAt(aircraft.position);
+                } else {
+                    // First-person perspective (cockpit view)
+                    camera.position.copy(aircraft.position);
+                    camera.position.y += 1.5;
+                    camera.quaternion.copy(aircraft.quaternion);
+                }
+                
+                // Check for collisions
+                checkCollision();
+                
+                // Update altitude
+                state.altitude = aircraft.position.y - getTerrainHeight(aircraft.position.x, aircraft.position.z);
+                
+                // Update UI
+                document.getElementById('speed').textContent = Math.round(state.speed);
+                document.getElementById('altitude').textContent = Math.round(state.altitude);
+                document.getElementById('throttle').textContent = Math.round(state.throttle);
+                document.getElementById('health').textContent = Math.round(state.health);
+                
+                // Render scene
+                renderer.render(scene, camera);
+            };
+            
+            // Handle window resize
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+            
+            // Start animation
+            animate();
+        });
+    </script>
+</body>
+</html>
